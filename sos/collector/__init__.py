@@ -33,6 +33,7 @@ from sos.options import ClusterOption, str_to_bool
 from sos.component import SoSComponent
 from sos.utilities import bold
 from sos import __version__
+from sos.upload import SoSUpload
 
 COLLECTOR_CONFIG_DIR = '/etc/sos/groups.d'
 
@@ -145,7 +146,8 @@ class SoSCollector(SoSComponent):
         'upload_s3_bucket': None,
         'upload_s3_access_key': None,
         'upload_s3_secret_key': None,
-        'upload_s3_object_prefix': None
+        'upload_s3_object_prefix': None,
+        'upload_profile': None
     }
 
     def __init__(self, parser, parsed_args, cmdline_args):
@@ -1204,14 +1206,6 @@ this utility or remote systems that it connects to.
 
         self.intro()
 
-        if self.opts.batch and self.opts.password:
-            self.exit(
-                "\nsos-collector was called with incompatible options --batch "
-                "and --password.\nIf you need to use --password,"
-                " please omit batch mode.\n",
-                1
-            )
-
         self.configure_sos_cmd()
         self.prep()
         self.display_nodes()
@@ -1304,10 +1298,23 @@ this utility or remote systems that it connects to.
             msg = 'No sos reports were collected, nothing to archive...'
             self.exit(msg, 1)
 
-        if (self.opts.upload and self.policy.get_upload_url()) or \
+        if self.opts.upload or \
                 self.opts.upload_s3_endpoint:
             try:
-                self.policy.upload_archive(self.arc_name)
+                hook_commons = {
+                    'policy': self.policy,
+                    'tmpdir': self.tmpdir,
+                    'sys_tmp': self.sys_tmp,
+                    'options': self.opts,
+                    'manifest': self.manifest
+                }
+                uploader = SoSUpload(parser=self.parser,
+                                     args=self.args,
+                                     cmdline=self.cmdline,
+                                     in_place=True,
+                                     hook_commons=hook_commons,
+                                     archive=self.arc_name)
+                uploader.execute()
                 self.ui_log.info("Uploaded archive successfully")
             except Exception as err:
                 self.ui_log.error(f"Upload attempt failed: {err}")

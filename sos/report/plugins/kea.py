@@ -22,12 +22,13 @@ class Kea(Plugin, IndependentPlugin):
 
     plugin_name = "kea"
     packages = ("kea", "kea-common",)
-    services = ('kea-ctrl-agent', 'kea-dhcp-ddns-server',
-                'kea-dhcp4-server', 'kea-dhcp6-server',)
+    services = ('kea-ctrl-agent', 'kea-dhcp-ddns',
+                'kea-dhcp4', 'kea-dhcp6',)
 
     def setup(self):
         self.add_copy_spec([
             "/etc/kea/*",
+            "/var/log/kea/kea*.log",
         ])
         self.add_cmd_output([
             "keactrl status",

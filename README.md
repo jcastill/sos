@@ -1,159 +1,119 @@
-[![Main Pipeline](https://github.com/sosreport/sos/actions/workflows/main-pipeline.yaml/badge.svg)](https://github.com/sosreport/sos/actions/workflows/main-pipeline.yaml)
-[![Documentation Status](https://readthedocs.org/projects/sos/badge/?version=main)](https://sos.readthedocs.io/en/main/?badge=main)
-[![](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![sosreport](https://snapcraft.io/sosreport/badge.svg)](https://snapcraft.io/sosreport)
-[![Fedora package](https://img.shields.io/fedora/v/sos?color=darkgreen)](https://packages.fedoraproject.org/pkgs/sos/sos/)
-[![Ubuntu Package Version](https://img.shields.io/ubuntu/v/sos?color=darkgreen)](https://launchpad.net/ubuntu/+source/sos)
-[![Debian package (for distribution)](https://img.shields.io/debian/v/sos/unstable?color=darkgreen)](https://packages.debian.org/unstable/sos)
-![GitHub contributors](https://img.shields.io/github/contributors/sosreport/sos)
+# SoS Baseline Snapshots, Incremental Reports, and Compare
 
-# SoS
+This work adds three related capabilities to sos:
 
-Sos is an extensible, portable, support data collection tool primarily
-aimed at Linux distributions and other UNIX-like operating systems.
+1. **Baseline snapshots** -- capture file metadata (permissions, ownership, SELinux context, SHA-256 hashes) during `sos report` and save it as a dated JSON snapshot.
+2. **Incremental reports** -- skip files unchanged since the last snapshot, producing smaller and faster archives.
+3. **`sos compare`** -- a new subcommand that diffs two or more snapshots side by side, reporting added, removed, and changed files.
 
-This project is hosted at:
+## New flags for `sos report`
 
-  * https://github.com/sosreport/sos
+| Flag | Description |
+|------|-------------|
+| `--baseline` | Collect enhanced file metadata and save a snapshot to `/etc/sos/.baselines/` |
+| `--baseline-name NAME` | Scope snapshots by name (e.g. `production`, `staging`) |
+| `--incremental` | Skip files unchanged since the last snapshot (requires `--baseline`) |
 
-For the latest version, to contribute, and for more information, please visit
-the project pages or join the mailing list.
+## New subcommand: `sos compare`
 
-To clone the current main (development) branch run:
+| Command | Description |
+|---------|-------------|
+| `sos compare list` | List saved snapshots with system info (hostname, kernel, arch, collection type) |
+| `sos compare list --name NAME` | List only snapshots matching a name |
+| `sos compare diff <id1> <id2> [...]` | N-way snapshot comparison (text or JSON output) |
+| `sos compare diff --profile PROFILE` | Filter by plugin profile membership (e.g. `kernel`, `network`) |
+| `sos compare diff -i PATTERN` | Include only paths matching a glob |
+| `sos compare diff -e PATTERN` | Exclude paths matching a glob |
+| `sos compare diff --output-format json` | Machine-readable JSON output |
 
-```
-git clone git://github.com/sosreport/sos.git
-```
+## Tracked metadata
 
-## Reporting bugs
+Each file in a snapshot records:
 
-Please report bugs by opening an issue in the [GitHub Issue Tracker][4].
+- File type, permissions (mode), UID/GID, owner/group names
+- Size, modification time (`mtime_ns`), status change time (`ctime_ns`)
+- SELinux security context (on SELinux-enabled systems)
+- SHA-256 content hash for regular files under `/etc/`, `/boot/`, `/usr/bin/`, `/usr/sbin/`, `/lib/systemd/` (up to 10 MB)
+- Symlink targets
+- Collection mode (`full`, `tailed`, `skipped_unchanged`)
 
-## Chat
-
-The SoS project has rooms in Matrix and in Libera.Chat.
-
-Matrix Room: #sosreport:matrix.org
-
-Libera.Chat: #sos
-
-These rooms are bridged, so joining either is sufficient as messages from either will
-appear in both.
-
-The Freenode #sos room **is no longer used by this project**.
-
-## Patches and pull requests
-
-Patches can be submitted via the mailing list or as GitHub pull requests. If
-using GitHub please make sure your branch applies to the current main branch as a
-'fast forward' merge (i.e. without creating a merge commit). Use the `git
-rebase` command to update your branch to the current main if necessary.
-
-Please refer to the [contributor guidelines][0] for guidance on formatting
-patches and commit messages.
-
-Before sending a [pull request][0], it is advisable to check your contribution
-against the `flake8` & `pylint` linter, the unit tests, and the stage one avocado
-test suite:
+## Architecture
 
 ```
-# from within the git checkout
-$ tox -e flake8
-$ tox -e pylint
-$ tox -e unit_tests
-
-# as root
-# tox -e stageone_tests
+sos/
+  __init__.py                          # Registers 'compare' component
+  compare/
+    __init__.py                        # SoSCompare: CLI for list/diff actions
+  report/
+    __init__.py                        # --baseline/--incremental flag handling
+    plugins/__init__.py                # Per-file metadata collection in Plugin
+    snapshot/
+      store.py                         # save_snapshot(), load_snapshot(), find_latest_snapshot()
+      comparison.py                    # compare_snapshots(), format_diff_text()
+      incremental/
+        engine.py                      # IncrementalEngine: change detection entry point
+        metadata.py                    # collect_file_metadata(), file_changed(), get_file_hash()
 ```
 
-Note that the avocado test suite will generate and remove several reports over its
-execution, but no changes will be made to your local system.
+Snapshots are saved as `baseline[-HOSTNAME][-NAME]-YYYY-MM-DD_HH-MM-SSZ.json` with read-only permissions (0444) under `/etc/sos/.baselines/` (created with mode 0700).
 
-All contributions must pass the entire test suite before being accepted.
+Incremental snapshots reference their parent, forming a traceable chain. Each plugin's profile membership is recorded in the manifest to support semantic filtering during comparison without importing plugin classes.
 
-## Documentation
+## How to test
 
-User and API [documentation][5] is automatically generated using [Sphinx][6]
-and [Read the Docs][7].
+### Prerequisites
 
-To generate HTML documents locally, by default this will build locally into
-`docs/_build`
+- Python 3.8+
+- Root access (sos report requires root to collect system data)
+- A clone of this repository
 
-```
-tox -e docs
-```
+### Manual testing
 
+#### 1. Create a full baseline
 
-### Wiki
-
-For more in-depth information on the project's features and functionality, please
-see [the GitHub wiki][8].
-
-If you are interested in contributing an entirely new plugin, or extending sos to
-support your distribution of choice, please see these wiki pages:
-
-* [How to write a plugin][1]
-* [How to write a policy][2]
-* [Plugin options][3]
-
-To help get your changes merged quickly with as few revisions as possible
-please refer to the [Contributor Guidelines][0] when submitting patches or
-pull requests.
-
-## Installation
-
-### Manual Installation
-
-You can simply run from the git checkout now:
-```
-$ sudo ./bin/sos report 
+```bash
+sudo ./bin/sos report --baseline --batch
 ```
 
-To see a list of all available plugins and plugin options, run
-```
-$ sudo ./bin/sos report -l
-```
+Verify the snapshot was created:
 
-
-To install locally (as root):
-```
-# python3 setup.py install
+```bash
+sudo ls -la /etc/sos/.baselines/
 ```
 
+#### 2. Create a named baseline
 
-### Pre-built Packaging
-
-Fedora/RHEL users install via dnf:
-
-```
-# dnf install sos
+```bash
+sudo ./bin/sos report --baseline --baseline-name production --batch
 ```
 
-Debian users install via apt:
+#### 3. Run an incremental report
 
-```
-# apt install sosreport
-```
-
-
-Ubuntu (14.04 LTS and above) users install via apt:
-
-```
-# sudo apt install sosreport
+```bash
+sudo ./bin/sos report --baseline --incremental --batch
 ```
 
-### Snap Installation
+The archive should be smaller because unchanged files are skipped. Check the sos log for "skipped_unchanged" entries.
 
-```
-# snap install sosreport --classic
+#### 4. List snapshots
+
+```bash
+sudo sos compare list
+sudo sos compare list --name production
 ```
 
- [0]: https://github.com/sosreport/sos/wiki/Contribution-Guidelines
- [1]: https://github.com/sosreport/sos/wiki/How-to-Write-a-Plugin
- [2]: https://github.com/sosreport/sos/wiki/How-to-Write-a-Policy
- [3]: https://github.com/sosreport/sos/wiki/Plugin-options
- [4]: https://github.com/sosreport/sos/issues?state=open
- [5]: https://sos.readthedocs.org/
- [6]: https://www.sphinx-doc.org/
- [7]: https://www.readthedocs.org/
- [8]: https://github.com/sosreport/sos/wiki
+#### 5. Diff two snapshots
+
+```bash
+# Use the date portions from the snapshot filenames
+sudo sos compare diff 2026-08-01_10-00-00 2026-08-02_10-00-00
+
+# JSON output
+sudo sos compare diff 2026-08-01_10-00-00 2026-08-02_10-00-00 --output-format json
+
+# Filter by profile
+sudo sos compare diff snap1 snap2 --profile kernel
+
+# Filter by path
+sudo sos compare diff snap1 snap2 -i '/etc/*' -e '/etc/alternatives/*'
+```

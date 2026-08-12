@@ -574,6 +574,8 @@ class Plugin():
         self.skip_commands = commons['cmdlineopts'].skip_commands
         self.default_environment = {}
         self._tail_files_list = []
+        self._incremental = commons.get('incremental_engine', None)
+        self._collect_metadata = commons.get('collect_metadata', False)
 
         self.soslog = self.commons['soslog'] if 'soslog' in self.commons \
             else logging.getLogger('sos')
@@ -635,6 +637,7 @@ class Plugin():
         self.manifest.add_field('strings', {})
         self.manifest.add_field('containers', {})
         self.manifest.add_list('collections', [])
+        self.manifest.add_list('profiles', list(self.profiles))
 
     def set_default_cmd_environment(self, env_vars):
         """
@@ -1537,6 +1540,7 @@ class Plugin():
             # FIXME: reflect permissions in archive
             self.archive.add_string("", dest)
         else:
+            self._log_debug(f"adding file '{srcpath}' to archive")
             self.archive.add_file(srcpath, dest, force=force)
 
         self.copied_files.append({
@@ -1864,6 +1868,12 @@ class Plugin():
             limit_reached = False
 
             _manifest_files = []
+            _manifest_metadata = []
+
+            if self._collect_metadata:
+                from sos.report.snapshot.incremental.metadata import (
+                    should_skip_file_metadata, collect_file_metadata
+                )
 
             for _file in files:
                 if _file in self.copy_paths:
@@ -1884,15 +1894,26 @@ class Plugin():
                     continue
 
                 try:
-                    file_size = os.stat(_file)[stat.ST_SIZE]
+                    self._log_debug(f"collecting path '{_file}'")
+                    file_stat = os.lstat(_file)
+                    file_size = file_stat.st_size
+                    if stat.S_ISLNK(file_stat.st_mode):
+                        try:
+                            target_stat = os.stat(_file)
+                            file_size = target_stat.st_size
+                        except OSError:
+                            file_size = 0
                 except OSError:
-                    # if _file is a broken symlink, we should collect it,
-                    # otherwise skip it
-                    if self.path_islink(_file):
-                        file_size = 0
-                    else:
-                        self._log_info(f"failed to stat '{_file}', skipping")
-                        continue
+                    self._log_info(f"failed to stat '{_file}', skipping")
+                    continue
+                if (self._incremental
+                        and self._incremental.should_skip(
+                            _file, file_stat)):
+                    skip_meta = self._incremental.get_skip_metadata(
+                        _file, file_stat)
+                    if skip_meta:
+                        _manifest_metadata.append(skip_meta)
+                    continue
                 current_size += file_size
 
                 if sizelimit and current_size > sizelimit:
@@ -1913,6 +1934,15 @@ class Plugin():
                         add_size = sizelimit + file_size - current_size
                         self._tail_files_list.append((_file, add_size))
                         _manifest_files.append(_file.lstrip('/'))
+                        # Add metadata for tailed file
+                        if self._collect_metadata:
+                            if not should_skip_file_metadata(_file):
+                                metadata = collect_file_metadata(
+                                    _file, file_stat, soslog=self.soslog)
+                                if metadata:
+                                    metadata["collection_mode"] = "tailed"
+                                    metadata["tail_size"] = add_size
+                                    _manifest_metadata.append(metadata)
                 else:
                     # size limit not exceeded, copy the file
                     _manifest_files.append(_file.lstrip('/'))
@@ -1920,6 +1950,14 @@ class Plugin():
                     # in the corner case we just reached the sizelimit, we
                     # should collect the whole file and stop
                     limit_reached = (sizelimit and current_size == sizelimit)
+                    # Add metadata for regular file
+                    if self._collect_metadata:
+                        if not should_skip_file_metadata(_file):
+                            metadata = collect_file_metadata(
+                                _file, file_stat, soslog=self.soslog)
+                            if metadata:
+                                metadata["collection_mode"] = "full"
+                                _manifest_metadata.append(metadata)
 
             if not container:
                 # container collection manifest additions are handled later
@@ -1927,6 +1965,7 @@ class Plugin():
                     self.manifest.files.append({
                         'specification': copyspec,
                         'files_copied': _manifest_files,
+                        'files_metadata': _manifest_metadata,
                         'tags': _spec_tags
                     })
         return None

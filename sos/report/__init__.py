@@ -17,7 +17,7 @@ import errno
 import logging
 import hashlib
 import pdb
-from datetime import datetime
+from datetime import datetime, timezone
 import glob
 
 from concurrent.futures import ThreadPoolExecutor
@@ -90,6 +90,9 @@ class SoSReport(SoSComponent):
     arg_defaults = {
         'alloptions': False,
         'all_logs': False,
+        'baseline': False,
+        'incremental': False,
+        'baseline_name': '',
         'build': False,
         'case_id': '',
         'chroot': 'auto',
@@ -206,6 +209,24 @@ class SoSReport(SoSComponent):
                                 dest="all_logs", default=False,
                                 help="collect all available logs regardless "
                                      "of size")
+        report_grp.add_argument("--baseline", action="store_true",
+                                dest="baseline", default=False,
+                                help="collect enhanced file metadata for "
+                                     "baseline comparison (permissions, "
+                                     "ownership, SELinux context, and SHA256 "
+                                     "hashes for critical files). A dated "
+                                     "snapshot is saved to "
+                                     "/etc/sos/.baselines/ for historical "
+                                     "tracking")
+        report_grp.add_argument("--incremental", action="store_true",
+                                dest="incremental", default=False,
+                                help="only collect files thatare new or "
+                                "modified since the last baseline "
+                                "snapshot (requires --baseline)")
+        report_grp.add_argument("--baseline-name", type=str, default='',
+                                dest="baseline_name",
+                                help="name for the baseline snapshot "
+                                "(creates baseline-HOST-NAME-DATE.json)")
         report_grp.add_argument("--since", action="store",
                                 dest="since", default=None, type=_format_since,
                                 help="Escapes archived files older than date. "
@@ -741,7 +762,9 @@ class SoSReport(SoSComponent):
             'verbosity': self.opts.verbosity,
             'cmdlineopts': self.opts,
             'devices': self.devices,
-            'namespaces': self.namespaces
+            'namespaces': self.namespaces,
+            'incremental_engine': getattr(self, '_incremental', None),
+            'collect_metadata': getattr(self, '_collect_metadata', False),
         }
 
     def get_temp_file(self):
@@ -1596,6 +1619,25 @@ class SoSReport(SoSComponent):
         self._add_sos_logs()
         if self.manifest is not None:
             self.archive.add_final_manifest_data(self.opts.compression_type)
+            # Save baseline snapshot if requested in the command line
+            if self.opts.baseline:
+                from sos.report.snapshot.store import save_snapshot
+                engine = getattr(self, '_incremental', None)
+                if engine and engine.previous_snapshot_path:
+                    self.archive.add_file(
+                        engine.previous_snapshot_path,
+                        dest=os.path.join('sos_reports',
+                                          'previous_baseline.json'))
+                    self.soslog.info(
+                        "Including previous baseline: "
+                        f"{engine.previous_snapshot_path}"
+                    )
+                save_snapshot(
+                    self.archive.manifest.get_json(indent=4),
+                    name=self.opts.baseline_name,
+                    hostname=self.policy.hostname,
+                    soslog=self.soslog
+                )
         # Hide upload passwords in the log files
         self._obfuscate_upload_passwords()
         # Now, separately clean the log files that cleaner also wrote to
@@ -1812,6 +1854,51 @@ class SoSReport(SoSComponent):
             self.report_md.devices.add_field(key, value)
         self.report_md.add_list('enabled_plugins', self.opts.enable_plugins)
         self.report_md.add_list('disabled_plugins', self.opts.skip_plugins)
+
+        if self.opts.baseline:
+            from sos.report.snapshot.store import load_snapshot
+            self.report_md.add_section('snapshot')
+            engine = getattr(self, '_incremental', None)
+            is_incremental = (self.opts.incremental
+                              and engine
+                              and engine.previous_snapshot_path)
+            self.report_md.snapshot.add_field(
+                'collection_type',
+                'incremental' if is_incremental else 'full'
+            )
+            self.report_md.snapshot.add_section('system')
+            self.report_md.snapshot.system.add_field(
+                'hostname', self.policy.hostname)
+            self.report_md.snapshot.system.add_field(
+                'kernel', self.policy.release)
+            self.report_md.snapshot.system.add_field(
+                'arch', self.policy.machine)
+            if is_incremental:
+                prev_path = engine.previous_snapshot_path
+                prev_fname = os.path.basename(prev_path)
+                try:
+                    prev_ctime = os.path.getmtime(prev_path)
+                    prev_time = datetime.fromtimestamp(
+                        prev_ctime, tz=timezone.utc
+                    ).strftime('%Y-%m-%dT%H:%M:%SZ')
+                except OSError:
+                    prev_time = ''
+                prev_data = load_snapshot(prev_path, soslog=self.soslog)
+                prev_type = 'unknown'
+                if prev_data:
+                    prev_snap = (prev_data.get('components', {})
+                                 .get('report', {})
+                                 .get('snapshot', {}))
+                    prev_type = prev_snap.get('collection_type',
+                                              'full')
+                self.report_md.snapshot.add_section('previous')
+                self.report_md.snapshot.previous.add_field(
+                    'filename', prev_fname)
+                self.report_md.snapshot.previous.add_field(
+                    'created', prev_time)
+                self.report_md.snapshot.previous.add_field(
+                    'collection_type', prev_type)
+
         self.report_md.add_section('plugins')
 
     def generate_manifest_tag_summary(self):
@@ -1863,6 +1950,23 @@ class SoSReport(SoSComponent):
 
     def execute(self):
         try:
+            if self.opts.incremental and not self.opts.baseline:
+                raise SystemExit("--incremental requires --baseline")
+
+            self._collect_metadata = (self.opts.baseline
+                                      or self.opts.incremental)
+            if self._collect_metadata:
+                from sos.report.snapshot.incremental.engine import (
+                    IncrementalEngine
+                )
+                self._incremental = IncrementalEngine(
+                    soslog=self.soslog)
+                if self.opts.incremental:
+                    self._incremental.load_previous(
+                        name=self.opts.baseline_name
+                    )
+            else:
+                self._incremental = None
             self.policy.set_commons(self.get_commons())
             self.load_plugins()
             self._set_all_options()

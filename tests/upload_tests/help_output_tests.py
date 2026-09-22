@@ -18,6 +18,7 @@ MISSING_ARCHIVE = '/nonexistent/sos-upload-stageone.tar.xz'
 # Every flag documented under the 'Upload Options' group by
 # SoSUpload.add_parser_options().
 UPLOAD_OPTIONS = [
+    '--preauth',
     '--case-id',
     '--upload-url',
     '--upload-user',

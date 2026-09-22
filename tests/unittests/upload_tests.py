@@ -7,6 +7,7 @@
 # See the LICENSE file in the source distribution for further information.
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sos.policies.distros.redhat import RHELPolicy
@@ -544,6 +545,76 @@ class UT13CheckDistributionTests(unittest.TestCase):
     def test_base_target_never_matches(self):
         target = self._target_with_policy(UploadTarget, RHELPolicy)
         self.assertFalse(target.check_distribution())
+
+
+class UT14PreauthorizeTests(unittest.TestCase):
+    """UT14 - --preauth token pre-authorization per target.
+
+    Not part of the original UT01-UT13 list; added to cover the
+    preauthorize() hook introduced alongside --preauth.
+    """
+
+    # Stand-in for the OIDC access token. Never validated; the auth
+    # client is mocked, so any opaque string will do.
+    PUMP_UP_THE_JAM_TOKEN = 'pump-up-the-jam'
+
+    def test_base_target_declares_it_unsupported(self):
+        target = make_target(UploadTarget)
+        with self.assertRaises(NotImplementedError):
+            target.preauthorize()
+
+    def test_ubuntu_target_declares_it_unsupported(self):
+        target = make_target(UbuntuUploadTarget)
+        with self.assertRaises(NotImplementedError):
+            target.preauthorize()
+
+    def test_redhat_target_stores_the_access_token(self):
+        target = make_target(RHELUploadTarget)
+        target._device_token = None
+        auth = MagicMock()
+        auth.get_access_token.return_value = self.PUMP_UP_THE_JAM_TOKEN
+        with patch('sos.upload.targets.redhat.DeviceAuthorizationClass',
+                   return_value=auth) as device_auth:
+            target.preauthorize()
+        self.assertEqual(target._device_token,
+                         self.PUMP_UP_THE_JAM_TOKEN)
+        device_auth.assert_called_once_with(
+            RHELUploadTarget.client_identifier_url,
+            RHELUploadTarget.token_endpoint,
+            Path.home())
+
+    def test_redhat_target_requires_requests(self):
+        target = make_target(RHELUploadTarget)
+        with patch('sos.upload.targets.redhat.REQUESTS_LOADED', False):
+            with self.assertRaisesRegex(
+                    Exception, 'python3-requests is not installed'):
+                target.preauthorize()
+
+    def test_redhat_target_reports_a_cancelled_grant(self):
+        target = make_target(RHELUploadTarget)
+        with patch('sos.upload.targets.redhat.DeviceAuthorizationClass',
+                   side_effect=Exception('end user denied the request')):
+            with self.assertRaisesRegex(
+                    Exception, 'Device authorization was cancelled'):
+                target.preauthorize()
+
+    def test_redhat_target_reraises_other_auth_errors(self):
+        target = make_target(RHELUploadTarget)
+        with patch('sos.upload.targets.redhat.DeviceAuthorizationClass',
+                   side_effect=Exception('sso.redhat.com unreachable')):
+            with self.assertRaisesRegex(Exception, 'unreachable'):
+                target.preauthorize()
+
+    def test_redhat_target_rejects_an_empty_token(self):
+        target = make_target(RHELUploadTarget)
+        target._device_token = None
+        auth = MagicMock()
+        auth.get_access_token.return_value = None
+        with patch('sos.upload.targets.redhat.DeviceAuthorizationClass',
+                   return_value=auth):
+            with self.assertRaisesRegex(
+                    Exception, 'Failed to obtain a valid auth token'):
+                target.preauthorize()
 
 
 if __name__ == '__main__':

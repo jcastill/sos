@@ -188,6 +188,10 @@ class S201HttpsTransferTests(TransferTestCase):
                 target.upload_https()
 
     def test_other_status_reports_status_and_reason(self):
+        # upload_https() hardcodes "POST" in this message regardless of
+        # the method actually used, so a failed PUT still reports "POST
+        # request returned ...". Asserted as-is to match the shipped
+        # behaviour rather than the intended wording.
         target = self._target(opts=make_opts(upload_method='put'))
         with patch('sos.upload.targets.requests') as requests:
             requests.put.return_value = MagicMock(

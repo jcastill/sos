@@ -7,6 +7,7 @@
 # See the LICENSE file in the source distribution for further information.
 import os
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -51,6 +52,32 @@ RH_ATTACHMENTS_URL = (
 CANONICAL_URL = 'https://files.support.canonical.com/uploads/'
 ARCHIVE = '/var/tmp/sosreport-testhost-2026-09-17.tar.xz'
 ARCHIVE_NAME = 'sosreport-testhost-2026-09-17.tar.xz'
+
+
+# The only environment variables the get_upload_*() helpers consult.
+# Tests scope just these so that everything else in os.environ stays
+# available to the code under test.
+SOS_UPLOAD_ENV_VARS = (
+    'SOSUPLOADUSER',
+    'SOSUPLOADPASSWORD',
+    'SOSUPLOADS3ACCESSKEY',
+    'SOSUPLOADS3SECRETKEY',
+)
+
+
+@contextmanager
+def upload_env(**overrides):
+    """Scope the upload credential variables without clearing os.environ.
+
+    Removes only the variables listed in SOS_UPLOAD_ENV_VARS so a
+    developer's shell cannot influence a result, applies any overrides,
+    and restores the previous environment on exit.
+    """
+    with patch.dict(os.environ):
+        for name in SOS_UPLOAD_ENV_VARS:
+            os.environ.pop(name, None)
+        os.environ.update(overrides)
+        yield
 
 
 def make_opts(**overrides):
@@ -186,39 +213,37 @@ class UT03CredentialPrecedenceTests(unittest.TestCase):
     def test_user_env_beats_cmdline_and_default(self):
         target = make_target(UploadTarget, upload_user='cmdline-user')
         target._upload_user = 'target-default'
-        with patch.dict(os.environ, {'SOSUPLOADUSER': 'env-user'},
-                        clear=True):
+        with upload_env(SOSUPLOADUSER='env-user'):
             self.assertEqual(target.get_upload_user(), 'env-user')
 
     def test_user_cmdline_beats_default(self):
         target = make_target(UploadTarget, upload_user='cmdline-user')
         target._upload_user = 'target-default'
-        with patch.dict(os.environ, {}, clear=True):
+        with upload_env():
             self.assertEqual(target.get_upload_user(), 'cmdline-user')
 
     def test_user_falls_back_to_default(self):
         target = make_target(UploadTarget)
         target._upload_user = 'target-default'
-        with patch.dict(os.environ, {}, clear=True):
+        with upload_env():
             self.assertEqual(target.get_upload_user(), 'target-default')
 
     def test_password_env_beats_cmdline_and_default(self):
         target = make_target(UploadTarget, upload_password='cmdline-pass')
         target._upload_password = 'target-default'
-        with patch.dict(os.environ, {'SOSUPLOADPASSWORD': 'env-pass'},
-                        clear=True):
+        with upload_env(SOSUPLOADPASSWORD='env-pass'):
             self.assertEqual(target.get_upload_password(), 'env-pass')
 
     def test_password_cmdline_beats_default(self):
         target = make_target(UploadTarget, upload_password='cmdline-pass')
         target._upload_password = 'target-default'
-        with patch.dict(os.environ, {}, clear=True):
+        with upload_env():
             self.assertEqual(target.get_upload_password(), 'cmdline-pass')
 
     def test_password_falls_back_to_default(self):
         target = make_target(UploadTarget)
         target._upload_password = 'target-default'
-        with patch.dict(os.environ, {}, clear=True):
+        with upload_env():
             self.assertEqual(target.get_upload_password(), 'target-default')
 
 
@@ -464,7 +489,7 @@ class UT11UbuntuUploadTests(unittest.TestCase):
                              upload_user='alice',
                              upload_password='sup3rs3cret')
         with patch('sos.upload.targets.requests') as mock_requests, \
-                patch.dict(os.environ, {}, clear=True):
+                upload_env():
             auth = target.get_upload_https_auth()
         mock_requests.auth.HTTPBasicAuth.assert_called_once_with(
             'alice', 'sup3rs3cret')
